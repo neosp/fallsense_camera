@@ -3,6 +3,65 @@ import cv2
 import time
 import sys
 import os
+import subprocess
+import platform
+
+def open_in_vlc(url):
+    """
+    Open the camera stream directly in VLC media player.
+    This is useful when OpenCV cannot properly handle the stream but VLC can.
+    
+    Returns True if VLC was launched successfully, False otherwise.
+    """
+    print(f"Attempting to open stream in VLC: {url}")
+    
+    # Determine the correct VLC command based on operating system
+    vlc_cmd = None
+    if platform.system() == "Windows":
+        # Try common installation paths on Windows
+        vlc_paths = [
+            "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
+            "C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe"
+        ]
+        for path in vlc_paths:
+            if os.path.exists(path):
+                vlc_cmd = [path, url]
+                break
+        if vlc_cmd is None:
+            print("VLC not found in common locations. Please install VLC or specify the correct path.")
+            return False
+            
+    elif platform.system() == "Darwin":  # macOS
+        vlc_paths = [
+            "/Applications/VLC.app/Contents/MacOS/VLC",
+            os.path.expanduser("~/Applications/VLC.app/Contents/MacOS/VLC")
+        ]
+        for path in vlc_paths:
+            if os.path.exists(path):
+                vlc_cmd = [path, url]
+                break
+        if vlc_cmd is None:
+            print("VLC not found. Please install VLC.app in your Applications folder.")
+            return False
+            
+    else:  # Linux and other Unix-like systems
+        # Check if VLC is available in PATH
+        try:
+            subprocess.run(["which", "vlc"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            vlc_cmd = ["vlc", url]
+        except subprocess.CalledProcessError:
+            print("VLC not found. Please install VLC using your package manager.")
+            return False
+    
+    # Launch VLC
+    try:
+        print(f"Launching VLC with command: {' '.join(vlc_cmd)}")
+        subprocess.Popen(vlc_cmd)
+        print("VLC launched successfully. Close the VLC window when finished.")
+        return True
+    except Exception as e:
+        print(f"Error launching VLC: {e}")
+        return False
 
 def test_camera_connection():
     # Camera connection parameters for VStar C24S
@@ -21,10 +80,12 @@ def test_camera_connection():
     print(f"Using URL: {url}")
     
     # Try to connect to the camera with improved parameters for VStar cameras
+    # Set environment variables to mimic VLC's behavior
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|analyzeduration;10000000|reorder_queue_size;10000|buffer_size;10485760|stimeout;1000000"
     cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
     
     # Configure streaming parameters that may help with VStar C24S
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 10)
     
     # Give it a moment to connect
     print("Waiting for connection...")
@@ -96,7 +157,11 @@ def test_camera_connection():
                 print(f"Could not display image: {e}")
         else:
             print("ERROR: Could not capture a valid frame. The camera may be connected but not streaming properly.")
-            print("This is common with some VStar cameras - try the main script for more options.")
+            print("This is common with some VStar cameras.")
+            print("\nWould you like to try opening the stream in VLC instead? (y/n)")
+            choice = input()
+            if choice.lower() == 'y':
+                open_in_vlc(url)
     else:
         print("ERROR: Failed to connect to camera")
         print("Things to try:")
@@ -104,6 +169,12 @@ def test_camera_connection():
         print("2. Check that the IP address and port are correct")
         print("3. Ensure username and password are correct")
         print("4. Try with a different RTSP URL format")
+        print("5. Open in VLC instead (which is known to work with this camera)")
+        
+        print("\nWould you like to try opening the stream in VLC? (y/n)")
+        choice = input()
+        if choice.lower() == 'y':
+            open_in_vlc(url)
     
     # Clean up
     cap.release()
@@ -166,11 +237,28 @@ def test_alternative_paths():
 if __name__ == "__main__":
     print("VStar C24S Camera Connection Test\n")
     
-    choice = input("Test options:\n1. Test with known working URL\n2. Test multiple RTSP path formats\nEnter choice (1-2): ")
+    print("Test options:")
+    print("1. Test with OpenCV")
+    print("2. Open directly in VLC (recommended)")
+    print("3. Test multiple RTSP path formats")
+    choice = input("Enter choice (1-3): ")
+    
+    # Create the default URL
+    ip = "192.168.1.40"
+    port = "10554"
+    user = "admin"
+    password = "12345678"
+    path = "/tcp/av0_0"
+    url = f"rtsp://{user}:{password}@{ip}:{port}{path}"
     
     if choice == "1":
         test_camera_connection()
     elif choice == "2":
+        print("Opening stream directly in VLC (which is known to work with VStar C24S)...")
+        open_in_vlc(url)
+    elif choice == "3":
+        # Imported from within the script to avoid issues with function definition order
+        from camera_connect import test_alternative_paths
         test_alternative_paths()
     else:
         print("Invalid choice. Exiting.") 

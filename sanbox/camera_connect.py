@@ -3,6 +3,66 @@ import cv2
 import numpy as np
 import time
 import os
+import subprocess
+import platform
+import sys
+
+def open_in_vlc(url):
+    """
+    Open the camera stream directly in VLC media player.
+    This is useful when OpenCV cannot properly handle the stream but VLC can.
+    
+    Returns True if VLC was launched successfully, False otherwise.
+    """
+    print(f"Attempting to open stream in VLC: {url}")
+    
+    # Determine the correct VLC command based on operating system
+    vlc_cmd = None
+    if platform.system() == "Windows":
+        # Try common installation paths on Windows
+        vlc_paths = [
+            "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
+            "C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe"
+        ]
+        for path in vlc_paths:
+            if os.path.exists(path):
+                vlc_cmd = [path, url]
+                break
+        if vlc_cmd is None:
+            print("VLC not found in common locations. Please install VLC or specify the correct path.")
+            return False
+            
+    elif platform.system() == "Darwin":  # macOS
+        vlc_paths = [
+            "/Applications/VLC.app/Contents/MacOS/VLC",
+            os.path.expanduser("~/Applications/VLC.app/Contents/MacOS/VLC")
+        ]
+        for path in vlc_paths:
+            if os.path.exists(path):
+                vlc_cmd = [path, url]
+                break
+        if vlc_cmd is None:
+            print("VLC not found. Please install VLC.app in your Applications folder.")
+            return False
+            
+    else:  # Linux and other Unix-like systems
+        # Check if VLC is available in PATH
+        try:
+            subprocess.run(["which", "vlc"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            vlc_cmd = ["vlc", url]
+        except subprocess.CalledProcessError:
+            print("VLC not found. Please install VLC using your package manager.")
+            return False
+    
+    # Launch VLC
+    try:
+        print(f"Launching VLC with command: {' '.join(vlc_cmd)}")
+        subprocess.Popen(vlc_cmd)
+        print("VLC launched successfully. Close the VLC window when finished.")
+        return True
+    except Exception as e:
+        print(f"Error launching VLC: {e}")
+        return False
 
 def connect_to_ip_camera(ip="192.168.1.40", port="10554", user="admin", password="12345678", path="/tcp/av0_0", timeout=30):
     """
@@ -17,17 +77,23 @@ def connect_to_ip_camera(ip="192.168.1.40", port="10554", user="admin", password
     print(f"Connecting to VStar C24S camera at {ip}:{port}")
     print(f"Using URL: {url}")
     
+    # VLC-compatible options for OpenCV - these mimic what VLC might use
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|analyzeduration;10000000|reorder_queue_size;10000|buffer_size;10485760|stimeout;1000000"
+    
     # Create VideoCapture options to improve streaming reliability
     # These options help with VStar camera models
     cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
     
     # Configure specific parameters for RTSP streaming to improve reliability
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)  # Use a smaller buffer for lower latency
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 10)  # Use a larger buffer like VLC would
     
     # Set timeout parameters for better connection handling
     # This can help with VStar C24S models that have streaming issues
-    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC = 300000  # 30 seconds timeout
-    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, timeout * 1000)  # Convert to milliseconds
+    try:
+        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC = 300000  # 30 seconds timeout
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, timeout * 1000)  # Convert to milliseconds
+    except:
+        print("Warning: CAP_PROP_OPEN_TIMEOUT_MSEC not supported in this OpenCV version")
     
     # Give it a moment to connect
     print(f"Waiting for connection (up to {timeout} seconds)...")
@@ -51,7 +117,7 @@ def connect_to_ip_camera(ip="192.168.1.40", port="10554", user="admin", password
             alt_url = f"rtsp://{user}:{password}@{ip}:{port}{alt_path}"
             print(f"Trying alternative URL: {alt_url}")
             alt_cap = cv2.VideoCapture(alt_url, cv2.CAP_FFMPEG)
-            alt_cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+            alt_cap.set(cv2.CAP_PROP_BUFFERSIZE, 10)
             time.sleep(2)
             
             if alt_cap.isOpened():
@@ -298,6 +364,73 @@ def show_camera_properties(cap):
     else:
         print("\nConnection Test: Failed (could not capture frame)")
 
+def test_alternative_paths():
+    """
+    Test multiple common RTSP path formats for VStar C24S camera
+    """
+    # Camera connection parameters
+    ip = "192.168.1.40"
+    port = "10554"
+    user = "admin"
+    password = "12345678"
+    
+    # Common RTSP paths to try
+    paths = [
+        "/tcp/av0_0",          # From your working URL
+        "/h264Preview_01_main",
+        "/live/ch00_0",
+        "/cam/realmonitor?channel=1&subtype=0",
+        "/livestream/0",
+        "/videoMain",
+        "/live/ch01_0",
+        "/video1"
+    ]
+    
+    print("Testing multiple RTSP URL formats for VStar C24S camera...")
+    
+    for path in paths:
+        url = f"rtsp://{user}:{password}@{ip}:{port}{path}"
+        print(f"\nTrying URL: {url}")
+        
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 10)
+        
+        time.sleep(3)
+        
+        if cap.isOpened():
+            print(f"SUCCESS: Connected with path: {path}")
+            
+            # Try to read a frame
+            ret, frame = cap.read()
+            if ret and frame is not None and frame.size > 0:
+                print("SUCCESS: Captured a frame with this URL!")
+                
+                # Create output directory if it doesn't exist
+                output_dir = "test_captures"
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                filename = path.replace('/', '_')
+                if filename.startswith('_'):
+                    filename = filename[1:]
+                test_image = os.path.join(output_dir, f"vstar_c24s_{filename}_{timestamp}.jpg")
+                cv2.imwrite(test_image, frame)
+                print(f"Saved test image as {test_image}")
+                
+                # Ask if user wants to view in VLC
+                print("Would you like to open this stream in VLC? (y/n)")
+                if input().lower() == 'y':
+                    open_in_vlc(url)
+            else:
+                print("Connected but could not capture a frame")
+        else:
+            print(f"Failed to connect with path: {path}")
+        
+        cap.release()
+    
+    print("\nPath testing completed. If any paths worked, they should open in VLC if requested.")
+
 def main():
     print("=== VStar C24S Camera Connection Utility ===")
     
@@ -308,39 +441,60 @@ def main():
     password = "12345678"
     path = "/tcp/av0_0"
     
-    # Connect to the camera
-    print(f"\nConnecting to VStar C24S camera at {ip}:{port}...")
-    cap = connect_to_ip_camera(ip, port, user, password, path)
-    
-    if cap is None:
-        print("Failed to connect to camera. Exiting.")
-        return
+    # Construct the URL for both OpenCV and VLC
+    url = f"rtsp://{user}:{password}@{ip}:{port}{path}"
     
     # Main operation loop
     while True:
-        print("\nVStar C24S Camera Operations:")
-        print("1. Display live camera feed")
+        print("\nVStar C24S Camera Options:")
+        print("1. Connect and display with OpenCV")
         print("2. Take a picture")
         print("3. Record video")
         print("4. Show camera properties")
-        print("5. Reconnect to camera")
+        print("5. Open stream in VLC (recommended)")
         print("6. Change camera settings")
-        print("7. Quit")
+        print("7. Test alternative paths")
+        print("8. Quit")
         
-        choice = input("Enter your choice (1-7): ")
+        choice = input("Enter your choice (1-8): ")
         
         if choice == '1':
+            # Connect to the camera
+            print(f"\nConnecting to VStar C24S camera at {ip}:{port}...")
+            cap = connect_to_ip_camera(ip, port, user, password, path)
+            
+            if cap is None:
+                print("Failed to connect to camera.")
+                print("Would you like to try opening in VLC instead? (y/n)")
+                if input().lower() == 'y':
+                    open_in_vlc(url)
+                continue
+            
             # Pass all camera parameters for proper reconnection
             display_camera_feed(cap, auto_reconnect=True, 
                                ip=ip, port=port, user=user, 
                                password=password, path=path)
-            # Reconnect after feed closes
-            cap = connect_to_ip_camera(ip, port, user, password, path)
+            # Release the camera
+            if cap is not None:
+                cap.release()
         
         elif choice == '2':
+            # Connect to take a picture
+            cap = connect_to_ip_camera(ip, port, user, password, path)
+            if cap is None:
+                print("Failed to connect to camera. Cannot take picture.")
+                continue
+                
             save_image(cap)
+            cap.release()
         
         elif choice == '3':
+            # Connect to record video
+            cap = connect_to_ip_camera(ip, port, user, password, path)
+            if cap is None:
+                print("Failed to connect to camera. Cannot record video.")
+                continue
+                
             duration = input("Enter recording duration in seconds (default: 10): ")
             try:
                 duration = int(duration)
@@ -348,21 +502,22 @@ def main():
                 duration = 10
             
             record_video(cap, duration)
-            # Reconnect after recording
-            cap = connect_to_ip_camera(ip, port, user, password, path)
+            cap.release()
         
         elif choice == '4':
-            show_camera_properties(cap)
-        
-        elif choice == '5':
-            print("Reconnecting to camera...")
-            if cap is not None:
-                cap.release()
+            # Connect to show properties
             cap = connect_to_ip_camera(ip, port, user, password, path)
             if cap is None:
-                print("Failed to reconnect. Exiting.")
-                break
+                print("Failed to connect to camera. Cannot show properties.")
+                continue
                 
+            show_camera_properties(cap)
+            cap.release()
+        
+        elif choice == '5':
+            # Open directly in VLC (which is known to work)
+            open_in_vlc(url)
+        
         elif choice == '6':
             # Allow changing camera connection settings
             print("\nCurrent camera settings:")
@@ -386,26 +541,14 @@ def main():
             password = new_password
             path = new_path
             
-            # Reconnect with new settings
-            print("Connecting with new settings...")
-            if cap is not None:
-                cap.release()
-            cap = connect_to_ip_camera(ip, port, user, password, path)
-            if cap is None:
-                print("Failed to connect with new settings.")
-                print("Would you like to revert to previous settings? (y/n)")
-                if input().lower() == 'y':
-                    # Revert to known working settings
-                    ip = "192.168.1.40"
-                    port = "10554"
-                    user = "admin"
-                    password = "12345678"
-                    path = "/tcp/av0_0"
-                    cap = connect_to_ip_camera(ip, port, user, password, path)
+            # Update the URL
+            url = f"rtsp://{user}:{password}@{ip}:{port}{path}"
+            print(f"Settings updated. New URL: {url}")
         
         elif choice == '7':
-            if cap is not None:
-                cap.release()
+            test_alternative_paths()
+        
+        elif choice == '8':
             print("Exiting...")
             break
         
