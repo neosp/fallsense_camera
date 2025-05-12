@@ -1,0 +1,12 @@
+# FallSense Camera - Requirements
+# Core libraries
+opencv-python>=4.7.0
+numpy>=1.23.0
+mediapipe>=0.10.0
+requests>=2.28.0
+
+# Camera connection
+subprocess32>=3.5.4;python_version<"3.0"
+
+# Optional libraries for audio alerts
+winsound;platform_system=="Windows" 
