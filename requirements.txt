@@ -2,7 +2,7 @@
 # Core libraries
 opencv-python>=4.7.0
 numpy>=1.23.0
-mediapipe>=0.10.0
+mediapipe>=0.10.0  # For face, hand and pose detection
 requests>=2.28.0
 
 # Camera connection

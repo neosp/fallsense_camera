@@ -1016,6 +1016,378 @@ class OneEuroFilter:
         alpha = 1.0 / (1.0 + te)
         return alpha
 
+class FaceDetector:
+    def __init__(self, 
+                camera_ip="192.168.1.40", 
+                camera_port="10554", 
+                camera_user="admin", 
+                camera_pass="12345678", 
+                camera_path="/tcp/av0_0",
+                min_detection_confidence=0.7,
+                display=True,
+                record_detections=False,
+                output_dir="face_events",
+                discord_webhook=DISCORD_WEBHOOK,
+                verify_ssl=False):
+        """
+        Initialize the face detector with camera connection parameters and detection settings
+        """
+        self.camera_ip = camera_ip
+        self.camera_port = camera_port
+        self.camera_user = camera_user
+        self.camera_pass = camera_pass
+        self.camera_path = camera_path
+        self.min_detection_confidence = min_detection_confidence
+        self.display = display
+        self.record_detections = record_detections
+        self.output_dir = output_dir
+        self.discord_webhook = discord_webhook
+        self.verify_ssl = verify_ssl
+        
+        # Create output directory if it doesn't exist
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            
+        # Initialize MediaPipe Face Detection
+        self.mp_face_detection = mp.solutions.face_detection
+        self.mp_drawing = mp.solutions.drawing_utils
+        
+        # Model selection: 0 for short-range detection (faces within 2 meters), 
+        # 1 for full-range detection (faces within 5 meters)
+        self.model_selection = 1
+        
+        # Initialize face detector with the selected model
+        self.face_detector = self.mp_face_detection.FaceDetection(
+            model_selection=self.model_selection,
+            min_detection_confidence=min_detection_confidence
+        )
+        
+        # Initialize video writer variables
+        self.video_writer = None
+        self.record_start_time = None
+        self.recording = False
+        
+        # Frame processing optimization
+        self.frame_count = 0
+        self.process_every_n_frames = 1  # Process every frame by default
+        
+        # Connect to the camera
+        self.connect_camera()
+    
+    def connect_camera(self):
+        """Connect to the camera using the provided parameters"""
+        print(f"Connecting to camera at {self.camera_ip}:{self.camera_port}...")
+        self.cap = connect_to_ip_camera(
+            ip=self.camera_ip,
+            port=self.camera_port,
+            user=self.camera_user,
+            password=self.camera_pass,
+            path=self.camera_path
+        )
+        
+        if self.cap is None or not self.cap.isOpened():
+            print("Failed to connect to camera. Exiting.")
+            return False
+            
+        print("Successfully connected to camera")
+        return True
+    
+    def start_recording(self, frame):
+        """Start recording a video when faces are detected"""
+        if self.recording:
+            return
+            
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_filename = os.path.join(self.output_dir, f"face_event_{timestamp}.mp4")
+        
+        # Get frame dimensions
+        height, width = frame.shape[:2]
+        
+        # Initialize video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        self.video_writer = cv2.VideoWriter(video_filename, fourcc, 10, (width, height))
+        
+        self.record_start_time = time.time()
+        self.recording = True
+        print(f"Started recording face event to {video_filename}")
+    
+    def stop_recording(self):
+        """Stop recording the video"""
+        if not self.recording:
+            return
+            
+        self.video_writer.release()
+        self.video_writer = None
+        self.recording = False
+        print("Stopped recording face event")
+    
+    def save_screenshot(self, frame):
+        """Save a screenshot of the detected faces"""
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        screenshot_filename = os.path.join(self.output_dir, f"face_detected_{timestamp}.jpg")
+        
+        # Save the image with high quality (95% compression quality)
+        cv2.imwrite(screenshot_filename, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        print(f"Saved face screenshot to {screenshot_filename}")
+        return screenshot_filename
+    
+    def send_discord_alert(self, num_faces, frame=None):
+        """Send a face detection alert to Discord webhook with image attachment"""
+        try:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"Sending Discord alert for {num_faces} face(s) detected at {timestamp}")
+            
+            # Basic validation
+            if not self.discord_webhook:
+                print("No Discord webhook URL provided")
+                return
+            
+            # Create the data payload with the message content
+            data = {
+                "content": f"👤 **FACE DETECTED at {timestamp}!** 👤\nNumber of faces: {num_faces}\nCamera: {self.camera_ip}:{self.camera_port}",
+                "username": "Face Detection System"
+            }
+            
+            files = None
+            if frame is not None:
+                # Save the frame to a temporary file
+                temp_image_path = os.path.join(self.output_dir, f"temp_face_{timestamp}.jpg")
+                cv2.imwrite(temp_image_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                
+                # Prepare the file for upload
+                files = {
+                    'file': (f'face_detected_{timestamp}.jpg', open(temp_image_path, 'rb'), 'image/jpeg')
+                }
+                
+                print(f"Attaching image to Discord alert")
+            
+            print(f"Sending alert to Discord webhook")
+            
+            # Send the data with the image attachment if available
+            if files:
+                response = requests.post(
+                    self.discord_webhook,
+                    data={"payload_json": json.dumps(data)},
+                    files=files,
+                    verify=self.verify_ssl
+                )
+                # Clean up the temporary file
+                os.remove(temp_image_path)
+            else:
+                # Send text-only alert if no frame is provided
+                response = requests.post(
+                    self.discord_webhook,
+                    json=data,
+                    verify=self.verify_ssl
+                )
+            
+            print(f"Discord response: {response.status_code}")
+            if response.status_code == 204 or response.status_code == 200:
+                print("Discord alert sent successfully")
+            else:
+                print(f"Failed to send Discord alert: {response.status_code}")
+                
+        except Exception as e:
+            print(f"Error sending Discord alert: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def detect_faces(self, frame):
+        """
+        Process a frame to detect faces using MediaPipe
+        
+        Returns detections and annotated frame
+        """
+        # Resize frame to improve performance
+        h, w = frame.shape[:2]
+        target_height = 480  # Lower resolution for faster processing
+        scale = target_height / h
+        new_width = int(w * scale)
+        
+        # Use OpenCV resize (faster than numpy operations)
+        small_frame = cv2.resize(frame, (new_width, target_height))
+        
+        # Convert frame to RGB (MediaPipe requires RGB)
+        rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+        
+        # Set image data as not writeable to improve performance
+        rgb_frame.flags.writeable = False
+        
+        # Process the image and detect faces
+        results = self.face_detector.process(rgb_frame)
+        
+        # Set image as writeable again
+        rgb_frame.flags.writeable = True
+        
+        # Convert back to BGR for OpenCV
+        processed_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+        
+        # Resize back to original dimensions if needed for display
+        if self.display:
+            processed_frame = cv2.resize(processed_frame, (w, h))
+        
+        # Draw face detections on the processed frame
+        if results.detections:
+            num_faces = len(results.detections)
+            
+            for detection in results.detections:
+                # Get bounding box coordinates
+                bbox = detection.location_data.relative_bounding_box
+                
+                # Convert normalized coordinates to pixel coordinates
+                x_min = int(bbox.xmin * w)
+                y_min = int(bbox.ymin * h)
+                width = int(bbox.width * w)
+                height = int(bbox.height * h)
+                
+                # Draw bounding box
+                cv2.rectangle(processed_frame, (x_min, y_min), (x_min + width, y_min + height), (0, 255, 0), 2)
+                
+                # Add confidence score
+                confidence = detection.score[0]
+                cv2.putText(processed_frame, f"{confidence:.2f}", (x_min, y_min - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                
+                # Extract and draw facial landmarks
+                for idx, landmark in enumerate(detection.location_data.relative_keypoints):
+                    # Convert normalized coordinates to pixel coordinates
+                    landmark_x = int(landmark.x * w)
+                    landmark_y = int(landmark.y * h)
+                    
+                    # Draw landmarks
+                    cv2.circle(processed_frame, (landmark_x, landmark_y), 5, (255, 0, 0), -1)
+                
+            # Add text showing number of faces detected
+            cv2.putText(processed_frame, f"Faces Detected: {num_faces}", (10, 90), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+            return True, processed_frame, num_faces
+        
+        return False, processed_frame, 0
+    
+    def run(self):
+        """Run the face detection system"""
+        if self.cap is None or not self.cap.isOpened():
+            print("Camera is not connected. Please try connecting to the camera first.")
+            return
+        
+        print("Starting face detection. Press 'q' to quit.")
+        
+        try:
+            # For FPS calculation
+            prev_time = time.time()
+            frame_counter = 0
+            fps = 0
+            last_alert_time = 0
+            
+            while True:
+                # Read a frame from the camera
+                ret, frame = self.cap.read()
+                
+                if not ret:
+                    print("Failed to grab frame. Reconnecting...")
+                    self.cap.release()
+                    if not self.connect_camera():
+                        break
+                    continue
+                
+                # Calculate FPS
+                frame_counter += 1
+                if (time.time() - prev_time) > 1:
+                    fps = frame_counter
+                    frame_counter = 0
+                    prev_time = time.time()
+                
+                # Skip frames to improve performance
+                self.frame_count += 1
+                if self.frame_count % self.process_every_n_frames != 0:
+                    continue
+                
+                # Make a copy of the frame for display
+                display_frame = frame.copy()
+                
+                # Add timestamp to the frame
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                cv2.putText(display_frame, timestamp, (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                
+                # Detect faces in the frame
+                faces_detected, display_frame, num_faces = self.detect_faces(display_frame)
+                
+                # If faces are detected, we can optionally send alerts and record
+                if faces_detected:
+                    # Send Discord alert (but not too frequently)
+                    current_time = time.time()
+                    if current_time - last_alert_time > MIN_TIME_BETWEEN_ALERTS:
+                        if self.discord_webhook:
+                            threading.Thread(
+                                target=self.send_discord_alert,
+                                args=(num_faces, display_frame.copy()),  # Pass the frame to the alert method
+                                daemon=True
+                            ).start()
+                        last_alert_time = current_time
+                    
+                    # Save screenshot if recording is enabled
+                    if self.record_detections and not self.recording:
+                        self.save_screenshot(display_frame)
+                        self.start_recording(display_frame)
+                
+                # Record video if in recording mode
+                if self.recording:
+                    self.video_writer.write(display_frame)
+                    
+                    # Add a green border to indicate recording
+                    cv2.rectangle(display_frame, (0, 0), 
+                                 (display_frame.shape[1], display_frame.shape[0]), 
+                                 (0, 255, 0), 5)
+                    
+                    # Stop recording after 10 seconds
+                    if time.time() - self.record_start_time > 10:
+                        self.stop_recording()
+                
+                # Add status text
+                status_text = "Status: "
+                if self.recording:
+                    status_text += "RECORDING FACE EVENT"
+                    status_color = (0, 255, 0)
+                elif faces_detected:
+                    status_text += f"{num_faces} FACE(S) DETECTED!"
+                    status_color = (0, 255, 0)
+                else:
+                    status_text += "Monitoring"
+                    status_color = (255, 255, 255)
+                
+                cv2.putText(display_frame, status_text, (10, 60), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+                
+                # Add FPS display
+                cv2.putText(display_frame, f"FPS: {fps}", (display_frame.shape[1] - 120, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                # Display the frame if required
+                if self.display:
+                    cv2.imshow("Face Detection", display_frame)
+                    
+                    # Press 'q' to exit
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                
+                # Small delay to reduce CPU usage
+                time.sleep(0.005)
+                
+        except KeyboardInterrupt:
+            print("Interrupted by user")
+        finally:
+            # Clean up
+            if self.recording:
+                self.stop_recording()
+            
+            if self.cap is not None:
+                self.cap.release()
+            
+            cv2.destroyAllWindows()
+            print("Face detection stopped")
+
 def main():
     """Main function to run the detector"""
     parser = argparse.ArgumentParser(description="MediaPipe Detection System")
@@ -1056,8 +1428,8 @@ def main():
                       help="Verify SSL certificates for HTTPS requests")
     
     # Mode selection
-    parser.add_argument("--mode", choices=["fall", "hand"], default="fall",
-                      help="Detection mode: fall for fall detection, hand for hand detection")
+    parser.add_argument("--mode", choices=["fall", "hand", "face"], default="fall",
+                      help="Detection mode: fall for fall detection, hand for hand detection, face for face detection")
     
     args = parser.parse_args()
     
@@ -1126,6 +1498,38 @@ def main():
             display=not args.no_display,
             record_detections=args.record_video,
             output_dir=os.path.join(args.output_dir, "hands"),
+            discord_webhook=args.discord_webhook,
+            verify_ssl=args.verify_ssl
+        )
+        
+        # Set the performance parameters
+        detector.process_every_n_frames = args.skip_frames
+        
+        detector.run()
+    
+    elif args.mode == "face":
+        print("\n=== MediaPipe Face Detection System ===")
+        print("System will detect faces and send alerts")
+        if args.record_video:
+            print("Video recording is enabled")
+        else:
+            print("Video recording is disabled")
+        
+        print("Discord notifications are enabled")
+        if not args.verify_ssl:
+            print("SSL certificate verification is disabled")
+        
+        # Create and run the face detector
+        detector = FaceDetector(
+            camera_ip=args.ip,
+            camera_port=args.port,
+            camera_user=args.user,
+            camera_pass=args.password,
+            camera_path=args.path,
+            min_detection_confidence=args.min_detection_confidence,
+            display=not args.no_display,
+            record_detections=args.record_video,
+            output_dir=os.path.join(args.output_dir, "faces"),
             discord_webhook=args.discord_webhook,
             verify_ssl=args.verify_ssl
         )
