@@ -67,3 +67,5 @@ If you encounter SSL certificate verification issues, the system automatically b
 1. Checking camera IP, port, username and password
 2. Ensuring your network allows RTSP connections
 3. Installing VLC media player for alternative viewing
+
+python fallsense_camera/sanbox/fall_detection.py --mode face --record-video --min-detection-confidence 0.6
